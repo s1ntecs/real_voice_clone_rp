@@ -1,242 +1,235 @@
-import base64
-import io
 import os
-import random
+import sys
+import shutil
+import zipfile
+import urllib.request
+import urllib.parse
 import tempfile
-import time
+import base64
 from typing import Any, Dict, Optional
-
-import torch
-import torchaudio
+from argparse import Namespace
 
 import runpod
 from runpod.serverless.utils.rp_download import file as rp_file
 from runpod.serverless.modules.rp_logger import RunPodLogger
 
-# Импорты из DiffRhythm
-from infer.infer import inference
-from infer.infer_utils import (
-    get_lrc_token,
-    get_negative_style_prompt,
-    get_reference_latent,
-    get_style_prompt,
-    prepare_model,
-)
+# Добавляем src в путь для импорта main
+sys.path.insert(0, os.path.abspath("src"))
+import main as m
 
 LOGGER = RunPodLogger()
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
-SR = 44100
-
-# Кэшим модели по длине (2048 | 6144)
-_CACHE = {}
-
+# Устанавливаем переменные окружения
 os.environ.setdefault("HF_HOME", "/workspace/.cache/huggingface")
 os.environ.setdefault("TORCH_HOME", "/workspace/.cache/torch")
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
-def _download_to_local(url: str) -> Optional[str]:
-    """Скачивает файл по URL и возвращает локальный путь."""
+def download_online_model(url: str, dir_name: str) -> None:
+    """Скачивает и распаковывает модель RVC."""
+    LOGGER.info(f"Downloading voice model: {dir_name}")
+
+    zip_name = url.split("/")[-1]
+    extraction_folder = os.path.join(m.rvc_models_dir, dir_name)
+
+    if os.path.exists(extraction_folder):
+        LOGGER.info(f"Model {dir_name} already exists, skipping download")
+        return
+
+    # Обработка pixeldrain URLs
+    if "pixeldrain.com" in url:
+        url = f"https://pixeldrain.com/api/file/{zip_name}"
+
+    try:
+        urllib.request.urlretrieve(url, zip_name)
+
+        LOGGER.info("Extracting model...")
+        with zipfile.ZipFile(zip_name, "r") as zip_ref:
+            for member in zip_ref.infolist():
+                if member.is_dir():
+                    continue
+
+                os.makedirs(extraction_folder, exist_ok=True)
+
+                with zip_ref.open(member) as source, open(
+                    os.path.join(extraction_folder,
+                                 os.path.basename(member.filename)), "wb"
+                ) as target:
+                    shutil.copyfileobj(source, target)
+
+        # Удаляем временный zip
+        if os.path.exists(zip_name):
+            os.remove(zip_name)
+
+        LOGGER.info(f"Model {dir_name} successfully downloaded!")
+
+    except Exception as e:
+        LOGGER.error(f"Failed to download model: {e}")
+        raise
+
+
+def download_audio_from_url(url: str) -> str:
+    """Скачивает аудио файл по URL и возвращает локальный путь."""
     try:
         info = rp_file(url)
         return info["file_path"]
     except Exception as e:
-        LOGGER.error(f"Download failed: {e}")
-        return None
+        LOGGER.error(f"Failed to download audio: {e}")
+        # Fallback на прямую загрузку
+        temp_path = os.path.join(tempfile.gettempdir(), "input_audio.mp3")
+        urllib.request.urlretrieve(url, temp_path)
+        return temp_path
 
 
-def _is_valid_duration(x: int) -> bool:
-    """Проверяет валидность длительности."""
-    return x == 95 or (96 <= x <= 285)
-
-
-def _wav_b64_from_tensor(t: torch.Tensor, sr: int = SR) -> str:
-    """Конвертирует тензор аудио в base64."""
-    buf = io.BytesIO()
-    torchaudio.save(buf, t.cpu(), sample_rate=sr, format="wav")
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode("utf-8")
-
-
-def _load_models(max_frames: int, device: str):
-    """Загружает и кэширует модели для заданного max_frames."""
-    if max_frames not in _CACHE:
-        LOGGER.info(f"Loading models for max_frames={max_frames} on {device}")
-        cfm, tokenizer, muq, vae = prepare_model(max_frames, device)
-        _CACHE[max_frames] = {
-            "cfm": cfm,
-            "tokenizer": tokenizer,
-            "muq": muq,
-            "vae": vae
-        }
-    m = _CACHE[max_frames]
-    return m["cfm"], m["tokenizer"], m["muq"], m["vae"]
+def audio_to_base64(file_path: str) -> str:
+    """Конвертирует аудио файл в base64."""
+    with open(file_path, "rb") as audio_file:
+        return base64.b64encode(audio_file.read()).decode("utf-8")
 
 
 def handler(job: Dict[str, Any]) -> Dict[str, Any]:
     """
-    RunPod Handler для DiffRhythm inference.
+    RunPod Handler для RVC Voice Conversion.
+
     Input параметры:
-      lyric: str - текст песни в LRC формате (может быть пустым)
-      audio_length: int - длина аудио (95 или 96-285)
-      music_duration: int - длительность музыки (по умолчанию = audio_length)
-      ref_prompt: str - текстовое описание стиля
-      ref_audio_url: str - URL референсного аудио для стиля
-      chunked: bool - использовать chunked декодирование (по умолчанию True)
-      seed: int - random seed (опционально)
-    Должен быть указан ЛИБО ref_prompt ЛИБО ref_audio_url (не оба сразу).
+      song_input_url: str - URL аудио файла для обработки
+      rvc_model: str - название модели RVC (по умолчанию "Squidward")
+      custom_rvc_model_download_url: str - URL для загрузки кастомной модели
+      pitch_change: str - изменение тона ("no-change", "male-to-female",
+        "female-to-male")
+      index_rate: float - контроль акцента AI (0-1, по умолчанию 0.5)
+      filter_radius: int - медианная фильтрация (0-7, по умолчанию 3)
+      rms_mix_rate: float - контроль громкости (0-1, по умолчанию 0.25)
+      pitch_detection_algorithm: str - алгоритм определения тона
+                                        ("rmvpe" или "mangio-crepe")
+      crepe_hop_length: int - hop length для crepe (по умолчанию 128)
+      protect: float - защита согласных (0-0.5, по умолчанию 0.33)
+      main_vocals_volume_change: float - изменение громкости осн вокала(дБ)
+      backup_vocals_volume_change: float - изменение громкости бэк-вокала (дБ)
+      instrumental_volume_change: float - изменение громкости инструментала(дБ)
+      pitch_change_all: float - изменение тональности всего трека
+      reverb_size: float - размер реверберации (0-1)
+      reverb_wetness: float - уровень реверберации (0-1)
+      reverb_dryness: float - уровень сухого сигнала (0-1)
+      reverb_damping: float - затухание реверберации (0-1)
+      output_format: str - формат вывода ("mp3" или "wav")
     """
-    t0 = time.time()
-    inp = job.get("input", {}) or {}
-
-    # Парсинг входных параметров
-    lyric = inp.get("lyric", "")
-    audio_length = int(inp.get("audio_length", 95))
-    music_duration = int(inp.get("music_duration", audio_length))
-
-    # Валидация длительностей
-    if not _is_valid_duration(audio_length):
-        return {"error": "audio_length must be 95 or between 96 and 285."}
-    if not _is_valid_duration(music_duration):
-        return {"error": "music_duration must be 95 or between 96 and 285."}
-
-    # Определяем max_frames на основе audio_length
-    max_frames = 2048 if audio_length == 95 else 6144
-
-    # Валидация референса стиля
-    ref_prompt = inp.get("ref_prompt", "")
-    ref_audio_url = inp.get("ref_audio_url", "")
-
-    if not (ref_prompt or ref_audio_url):
-        return {"error": "Either 'ref_prompt' or 'ref_audio_url' must be provided."}  # noqa
-    if ref_prompt and ref_audio_url:
-        return {"error": "Use only one: 'ref_prompt' OR 'ref_audio_url'."}
-
-    chunked = bool(inp.get("chunked", True))
-    seed = int(inp.get("seed", random.randint(0, 2**31 - 1)))
-    torch.manual_seed(seed)
 
     try:
-        # Загружаем модели
-        cfm, tokenizer, muq, vae = _load_models(max_frames, DEVICE)
+        inp = job.get("input", {}) or {}
 
-        LOGGER.info(f"Processing: audio_length={audio_length}, chunked={chunked}, seed={seed}")  # noqa
+        # Получение параметров с дефолтными значениями
+        song_input_url = inp.get("song_input_url")
+        if not song_input_url:
+            return {"error": "song_input_url is required"}
 
-        # Получаем токены лирики
-        lrc_prompt, start_time, end_frame, song_duration = get_lrc_token(
-            max_frames, lyric, tokenizer, music_duration, DEVICE
-        )
+        rvc_model = inp.get("rvc_model", "Squidward")
+        custom_rvc_model_download_url = inp.get(
+            "custom_rvc_model_download_url")
+        pitch_change = inp.get("pitch_change", "no-change")
+        index_rate = float(inp.get("index_rate", 0.5))
+        filter_radius = int(inp.get("filter_radius", 3))
+        rms_mix_rate = float(inp.get("rms_mix_rate", 0.25))
+        pitch_detection_algorithm = inp.get("pitch_detection_algorithm",
+                                            "rmvpe")
+        crepe_hop_length = int(inp.get("crepe_hop_length", 128))
+        protect = float(inp.get("protect", 0.33))
+        main_vocals_volume_change = float(inp.get("main_vocals_volume_change",
+                                                  0))
+        backup_vocals_volume_change = float(inp.get(
+            "backup_vocals_volume_change", 0))
+        instrumental_volume_change = float(inp.get(
+            "instrumental_volume_change", 0))
+        pitch_change_all = float(inp.get("pitch_change_all", 0))
+        reverb_size = float(inp.get("reverb_size", 0.15))
+        reverb_wetness = float(inp.get("reverb_wetness", 0.2))
+        reverb_dryness = float(inp.get("reverb_dryness", 0.8))
+        reverb_damping = float(inp.get("reverb_damping", 0.7))
+        output_format = inp.get("output_format", "mp3")
 
-        # Получаем style prompt
-        if ref_prompt:
-            # Текстовый промпт
-            LOGGER.info(f"Using text prompt: {ref_prompt}")
-            style_prompt = get_style_prompt(muq, prompt=ref_prompt)
-        else:
-            # Аудио референс
-            LOGGER.info(f"Downloading audio reference: {ref_audio_url}")
-            local_audio_path = _download_to_local(ref_audio_url)
-            if not local_audio_path:
-                return {"error": "Failed to download 'ref_audio_url'."}
+        LOGGER.info(f"Processing with model: {rvc_model}")
 
-            LOGGER.info(f"Using audio reference: {local_audio_path}")
-            style_prompt = get_style_prompt(muq, wav_path=local_audio_path)
-
-        # Получаем negative style prompt
-        negative_style_prompt = get_negative_style_prompt(DEVICE)
-
-        # Получаем латентный промпт и pred_frames
-        latent_prompt, pred_frames = get_reference_latent(
-            DEVICE,
-            max_frames,
-            False,  # edit
-            None,   # edit_start_time
-            None,   # edit_audio_path
-            vae
-        )
-
-        # Inference с autocast
-        LOGGER.info("Starting inference...")
-        with torch.autocast(device_type="cuda",
-                            enabled=(DEVICE == "cuda"),
-                            dtype=DTYPE):
-            out = inference(
-                cfm_model=cfm,
-                vae_model=vae,
-                cond=latent_prompt,
-                text=lrc_prompt,
-                duration=end_frame,
-                style_prompt=style_prompt,
-                negative_style_prompt=negative_style_prompt,
-                start_time=start_time,
-                pred_frames=pred_frames,
-                batch_infer_num=1,
-                song_duration=song_duration,
-                chunked=chunked
+        # Загрузка кастомной модели если указана
+        if custom_rvc_model_download_url:
+            custom_model_name = urllib.parse.unquote(
+                custom_rvc_model_download_url.split("/")[-1]
             )
+            custom_model_name = os.path.splitext(custom_model_name)[0]
 
-        # Проверяем результат
-        if not isinstance(out, list) or len(out) == 0:
-            return {"error": "Inference returned empty output."}
+            download_online_model(
+                url=custom_rvc_model_download_url,
+                dir_name=custom_model_name
+            )
+            rvc_model = custom_model_name
 
-        # Обрабатываем результат
-        audio_i16 = out[0]
+        # Загрузка входного аудио
+        LOGGER.info("Downloading input audio...")
+        song_input_path = download_audio_from_url(song_input_url)
 
-        # Приводим к правильной форме (channels, samples)
-        if audio_i16.ndim == 1:
-            audio_i16 = audio_i16[None, :]
-        elif audio_i16.ndim == 2 and audio_i16.shape[0] > audio_i16.shape[1]:
-            audio_i16 = audio_i16.T
+        # Конвертация pitch_change в числовое значение
+        if pitch_change == "no-change":
+            pitch_value = 0
+        elif pitch_change == "male-to-female":
+            pitch_value = 1
+        else:  # female-to-male
+            pitch_value = -1
 
-        # Сохраняем во временный файл
-        tmp = tempfile.mkdtemp()
-        out_wav = os.path.join(tmp, "output.wav")
-        torchaudio.save(out_wav, audio_i16.cpu(), sample_rate=SR)
+        # Проверка существования модели
+        model_path = os.path.join(m.rvc_models_dir, rvc_model)
+        if not os.path.exists(model_path):
+            return {"error": f"Model {rvc_model} not found at {model_path}"}
 
-        LOGGER.info(f"Audio saved to: {out_wav}")
+        # Запуск pipeline
+        LOGGER.info("Starting voice conversion pipeline...")
+        cover_path = m.song_cover_pipeline(
+            song_input_path,
+            rvc_model,
+            pitch_value,
+            keep_files=False,
+            main_gain=main_vocals_volume_change,
+            backup_gain=backup_vocals_volume_change,
+            inst_gain=instrumental_volume_change,
+            index_rate=index_rate,
+            filter_radius=filter_radius,
+            rms_mix_rate=rms_mix_rate,
+            f0_method=pitch_detection_algorithm,
+            crepe_hop_length=crepe_hop_length,
+            protect=protect,
+            pitch_change_all=pitch_change_all,
+            reverb_rm_size=reverb_size,
+            reverb_wet=reverb_wetness,
+            reverb_dry=reverb_dryness,
+            reverb_damping=reverb_damping,
+            output_format=output_format
+        )
 
-        # Конвертируем в base64 для возврата
-        b64 = _wav_b64_from_tensor(audio_i16, SR)
+        LOGGER.info(f"Cover generated at: {cover_path}")
 
-        elapsed = round(time.time() - t0, 3)
-        LOGGER.info(f"Inference completed in {elapsed}s")
+        # Конвертируем результат в base64
+        audio_base64 = audio_to_base64(cover_path)
 
-        return {
-            "output_path": out_wav,
-            "audio_base64": b64,
-            "sample_rate": SR,
-            "audio_length": audio_length,
-            "seed": seed,
-            "chunked": chunked,
-            "time_sec": elapsed,
+        # Опционально загружаем на S3 или возвращаем base64
+        result = {
+            "output_path": cover_path,
+            "audio_base64": audio_base64,
+            "format": output_format,
+            "model_used": rvc_model
         }
 
-    except torch.cuda.OutOfMemoryError as e:
-        msg = str(e)
-        LOGGER.error(f"CUDA OOM: {msg}")
-        return {
-            "error": "CUDA out of memory. Try audio_length=95 with chunked=True.",  # noqa
-            "detail": msg
-        }
-    except RuntimeError as e:
-        msg = str(e)
-        if "CUDA out of memory" in msg:
-            LOGGER.error(f"CUDA OOM: {msg}")
-            return {
-                "error": "CUDA out of memory. Try audio_length=95 with chunked=True.",  # noqa
-                "detail": msg
-            }
-        LOGGER.error(f"Runtime error: {msg}")
-        return {"error": msg}
+        # Очистка временных файлов
+        if os.path.exists(song_input_path) and song_input_path != cover_path:
+            os.remove(song_input_path)
+
+        return result
+
     except Exception as e:
+        LOGGER.error(f"Error in handler: {str(e)}")
         import traceback
-        trace = traceback.format_exc(limit=8)
-        LOGGER.error(f"Error: {str(e)}\n{trace}")
-        return {"error": str(e), "trace": trace}
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 
 if __name__ == "__main__":
-    LOGGER.info("Starting RunPod Serverless Handler...")
+    LOGGER.info("Starting RunPod Serverless Handler for RVC...")
     runpod.serverless.start({"handler": handler})

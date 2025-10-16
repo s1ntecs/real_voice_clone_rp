@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -6,56 +6,82 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TORCH_HOME=/workspace/.cache/torch \
     TOKENIZERS_PARALLELISM=false
 
-# Системные зависимости
+# ----- System deps -----
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-dev python3-pip python3.10-venv git wget \
-    espeak-ng ffmpeg libsndfile1 sox \
+    python3.9 python3.9-dev python3-pip python3.9-venv \
+    git wget curl ca-certificates \
+    libgl1-mesa-glx \
+    ffmpeg \
+    sox \
+    libsndfile1 \
+    build-essential \
+    google-perftools \
  && rm -rf /var/lib/apt/lists/*
+
+# Make python3 point to 3.9
+RUN ln -sf /usr/bin/python3.9 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.9 /usr/bin/python
 
 WORKDIR /workspace
 
+# ----- Torch stack (CUDA 11.8) -----
+RUN python3 -m pip install --upgrade pip setuptools wheel && \
+    python3 -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu118 \
+        torch==2.0.1+cu118 \
+        torchvision==0.15.2+cu118 \
+        torchaudio==2.0.2+cu118
 
-COPY requirements.txt .
+# ----- Project deps (как в cog.yaml), без requirements.txt -----
+# Примечание: при желании можно зафиксировать onnxruntime-gpu версией, например:
+# onnxruntime-gpu==1.16.3
+RUN python3 -m pip install --no-cache-dir \
+    deemix \
+    fairseq==0.12.2 \
+    faiss-cpu==1.7.3 \
+    "ffmpeg-python>=0.2.0" \
+    gradio==3.39.0 \
+    lib==4.0.0 \
+    librosa==0.9.1 \
+    numpy==1.23.5 \
+    onnxruntime-gpu \
+    "praat-parselmouth>=0.4.2" \
+    pedalboard==0.7.7 \
+    pydub==0.25.1 \
+    pyworld==0.3.4 \
+    Requests==2.31.0 \
+    scipy==1.11.1 \
+    soundfile==0.12.1 \
+    torchcrepe==0.0.20 \
+    tqdm==4.65.0 \
+    yt_dlp==2023.7.6 \
+    sox==1.4.1 \
+    "imageio[ffmpeg]"
 
-# Устанавливаем PyTorch 2.6.0 с CUDA 12.4
-RUN python3 -m pip install --upgrade pip && \
-    python3 -m pip install --index-url https://download.pytorch.org/whl/cu124 \
-    torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
+# ----- RunPod SDK -----
+RUN python3 -m pip install --no-cache-dir runpod
 
-# Устанавливаем зависимости проекта
-RUN python3 -m pip install -r /workspace/requirements.txt
+# ----- Project files -----
+# (Убираем COPY requirements.txt, т.к. не используем)
+RUN mkdir -p /workspace/src \
+    /workspace/rvc_models \
+    /workspace/mdxnet_models \
+    /workspace/.cache/huggingface \
+    /workspace/.cache/torch \
+    /workspace/song_output
 
-# Устанавливаем RunPod SDK
-RUN python3 -m pip install runpod
+COPY src/ /workspace/src/
+COPY mdxnet_models/ /workspace/mdxnet_models/
+COPY rvc_models/ /workspace/rvc_models/
+COPY rp_handler.py /workspace/
+COPY start_standalone.sh /workspace/
 
-# Копируем ВСЕ файлы
-COPY . /workspace/
-
-
-# ==========================================
-# ✅ ПРЕДЗАГРУЗКА МОДЕЛЕЙ (РЕКОМЕНДУЕТСЯ!)
-# ==========================================
-# Раскомментируй эти строки чтобы упаковать модели в образ
-# Это увеличит размер образа до ~12GB но ускорит cold start до 10-20 секунд
-
-# RUN python3 -m pip install huggingface_hub && \
+# (опционально) предзагрузка моделей
+# RUN python3 -m pip install --no-cache-dir huggingface_hub && \
 #     python3 /workspace/download_models.py
-
-# Альтернатива: загружать только base модель (экономия 3.5GB):
-# RUN python3 -m pip install huggingface_hub && \
+# или
+# RUN python3 -m pip install --no-cache-dir huggingface_hub && \
 #     python3 /workspace/download_models.py --no-full
 
-# ==========================================
-# ЕСЛИ НЕ ХОЧЕШЬ ПРЕДЗАГРУЗКУ:
-# ==========================================
-# Закомментируй строки выше с RUN python3... download_models.py
-# Модели загрузятся автоматически при первом запуске (займёт 3-5 минут)
-# ==========================================
+RUN chmod +x /workspace/start_standalone.sh
 
-# Создаём кэш директории
-RUN mkdir -p /workspace/.cache/huggingface /workspace/.cache/torch
-
-# Добавляем путь к Python
-# ENV PYTHONPATH="${PYTHONPATH}:/workspace"
-COPY --chmod=755 start_standalone.sh /start.sh
 ENTRYPOINT ["/workspace/start_standalone.sh"]
