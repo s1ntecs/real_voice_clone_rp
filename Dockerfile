@@ -59,7 +59,8 @@ RUN python3 -m pip install --no-cache-dir \
     tqdm==4.65.0 \
     yt_dlp==2023.7.6 \
     sox==1.4.1 \
-    "imageio[ffmpeg]"
+    "imageio[ffmpeg]" \
+    "gradio"
 
 # ----- RunPod SDK -----
 RUN python3 -m pip install --no-cache-dir runpod
