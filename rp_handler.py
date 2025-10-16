@@ -20,8 +20,8 @@ import main as m
 LOGGER = RunPodLogger()
 
 # Устанавливаем переменные окружения
-os.environ.setdefault("HF_HOME", "/workspace/.cache/huggingface")
-os.environ.setdefault("TORCH_HOME", "/workspace/.cache/torch")
+os.environ.setdefault("HF_HOME", "/.cache/huggingface")
+os.environ.setdefault("TORCH_HOME", "/.cache/torch")
 
 
 def download_online_model(url: str, dir_name: str) -> None:
@@ -127,7 +127,13 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
             "custom_rvc_model_download_url")
         pitch_change = inp.get("pitch_change", "no-change")
         index_rate = float(inp.get("index_rate", 0.5))
+        if not 0 <= index_rate <= 1:
+            return {"error": "index_rate must be between 0 and 1"}
+
         filter_radius = int(inp.get("filter_radius", 3))
+        if not 0 <= filter_radius <= 7:
+            return {"error": "filter_radius must be between 0 and 7"}
+
         rms_mix_rate = float(inp.get("rms_mix_rate", 0.25))
         pitch_detection_algorithm = inp.get("pitch_detection_algorithm",
                                             "rmvpe")
@@ -145,6 +151,9 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
         reverb_dryness = float(inp.get("reverb_dryness", 0.8))
         reverb_damping = float(inp.get("reverb_damping", 0.7))
         output_format = inp.get("output_format", "mp3")
+
+        if output_format not in ["mp3", "wav"]:
+            return {"error": "output_format must be 'mp3' or 'wav'"}
 
         LOGGER.info(f"Processing with model: {rvc_model}")
 
