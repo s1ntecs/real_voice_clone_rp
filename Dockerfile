@@ -20,14 +20,14 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     git lfs install
 
-RUN ln -sf /usr/bin/python3.9 /usr/bin/python3 && \
-    ln -sf /usr/bin/python3.9 /usr/bin/python
+RUN ln -sf /usr/bin/python3 /usr/bin/python && \
+    python3 -m pip install --upgrade pip
 
 WORKDIR /workspace
 
 # ----- Torch stack (CUDA 11.8) -----
-RUN pip3 install --upgrade pip setuptools wheel && \
-    pip3 install \
+RUN python3 -m pip install --upgrade pip setuptools wheel && \
+    python3 -m pip install \
       --no-cache-dir \
       --timeout=120 \
       --retries=5 \
