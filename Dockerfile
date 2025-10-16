@@ -62,6 +62,12 @@ RUN python3 -m pip install --no-cache-dir \
     "imageio[ffmpeg]" \
     "gradio"
 
+
+# ----- Gradio + websockets fix -----
+RUN python3 -m pip install --no-cache-dir --upgrade \
+    "websockets>=13.0" \
+    "gradio>=4.0.0"
+
 # ----- RunPod SDK -----
 RUN python3 -m pip install --no-cache-dir runpod
 
