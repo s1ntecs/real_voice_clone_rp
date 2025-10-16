@@ -1,35 +1,40 @@
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    HF_HOME=/workspace/.cache/huggingface \
-    TORCH_HOME=/workspace/.cache/torch \
-    TOKENIZERS_PARALLELISM=false
+    PIP_NO_CACHE_DIR=off \
+    SHELL=/bin/bash \
+    HF_HOME=.cache/huggingface \
+    TORCH_HOME=.cache/torch
 
-# ----- System deps -----
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.9 python3.9-dev python3-pip python3.9-venv \
-    git wget curl ca-certificates \
-    libgl1-mesa-glx \
-    ffmpeg \
-    sox \
-    libsndfile1 \
-    build-essential \
-    google-perftools \
- && rm -rf /var/lib/apt/lists/*
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Make python3 point to 3.9
+# System deps
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      python3.9 python3.9-dev python3-pip python3.9-venv \
+      git git-lfs wget curl ca-certificates \
+      libglib2.0-0 libsm6 libgl1-mesa-glx libxrender1 libxext6 libsndfile1 \
+      ffmpeg sox build-essential google-perftools \
+      fonts-dejavu-core procps jq && \
+    rm -rf /var/lib/apt/lists/* && \
+    git lfs install
+
 RUN ln -sf /usr/bin/python3.9 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.9 /usr/bin/python
 
 WORKDIR /workspace
 
 # ----- Torch stack (CUDA 11.8) -----
-RUN python3 -m pip install --upgrade pip setuptools wheel && \
-    python3 -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu118 \
-        torch==2.0.1+cu118 \
-        torchvision==0.15.2+cu118 \
-        torchaudio==2.0.2+cu118
+RUN pip3 install --upgrade pip setuptools wheel && \
+    pip3 install \
+      --no-cache-dir \
+      --timeout=120 \
+      --retries=5 \
+      torch==2.0.1+cu118 \
+      torchvision==0.15.2+cu118 \
+      torchaudio==2.0.2+cu118 \
+      --index-url https://download.pytorch.org/whl/cu118
 
 # ----- Project deps (как в cog.yaml), без requirements.txt -----
 # Примечание: при желании можно зафиксировать onnxruntime-gpu версией, например:
@@ -60,28 +65,11 @@ RUN python3 -m pip install --no-cache-dir \
 # ----- RunPod SDK -----
 RUN python3 -m pip install --no-cache-dir runpod
 
-# ----- Project files -----
-# (Убираем COPY requirements.txt, т.к. не используем)
-RUN mkdir -p /workspace/src \
-    /workspace/rvc_models \
-    /workspace/mdxnet_models \
-    /workspace/.cache/huggingface \
-    /workspace/.cache/torch \
-    /workspace/song_output
+COPY . .
 
-COPY src/ /workspace/src/
-COPY mdxnet_models/ /workspace/mdxnet_models/
-COPY rvc_models/ /workspace/rvc_models/
-COPY rp_handler.py /workspace/
-COPY start_standalone.sh /workspace/
+# Prepare dirs
+RUN mkdir -p rvc_models mdxnet_models song_output .cache/huggingface .cache/torch
 
-# (опционально) предзагрузка моделей
-# RUN python3 -m pip install --no-cache-dir huggingface_hub && \
-#     python3 /workspace/download_models.py
-# или
-# RUN python3 -m pip install --no-cache-dir huggingface_hub && \
-#     python3 /workspace/download_models.py --no-full
-
-RUN chmod +x /workspace/start_standalone.sh
-
-ENTRYPOINT ["/workspace/start_standalone.sh"]
+# Entry
+COPY --chmod=755 start_standalone.sh /start.sh
+CMD ["/start.sh"]
