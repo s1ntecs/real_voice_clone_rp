@@ -20,13 +20,12 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     git lfs install
 
-RUN ln -sf /usr/bin/python3 /usr/bin/python && \
-    python3 -m pip install --upgrade pip
+RUN ln -sf /usr/bin/python3 /usr/bin/python
 
 WORKDIR /workspace
 
 # ----- Torch stack (CUDA 11.8) -----
-RUN python3 -m pip install --upgrade pip setuptools wheel && \
+RUN python3 -m pip install --upgrade pip==24.0 setuptools wheel && \
     python3 -m pip install \
       --no-cache-dir \
       --timeout=120 \
@@ -34,7 +33,7 @@ RUN python3 -m pip install --upgrade pip setuptools wheel && \
       torch==2.0.1+cu118 \
       torchvision==0.15.2+cu118 \
       torchaudio==2.0.2+cu118 \
-      --index-url https://download.pytorch.org/whl/cu118
+      --extra-index-url https://download.pytorch.org/whl/cu118
 
 # ----- Project deps (как в cog.yaml), без requirements.txt -----
 # Примечание: при желании можно зафиксировать onnxruntime-gpu версией, например:
