@@ -47,7 +47,8 @@ RUN python3 -m pip install --no-cache-dir \
     lib==4.0.0 \
     librosa==0.9.1 \
     numpy==1.23.5 \
-    onnxruntime-gpu \
+    # onnxruntime-gpu \
+    onnxruntime-gpu==1.15.1\
     "praat-parselmouth>=0.4.2" \
     pedalboard==0.7.7 \
     pydub==0.25.1 \

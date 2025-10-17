@@ -9,6 +9,9 @@ import base64
 from typing import Any, Dict, Optional
 from argparse import Namespace
 
+import torch
+import onnxruntime as ort
+
 import runpod
 from runpod.serverless.utils.rp_download import file as rp_file
 from runpod.serverless.modules.rp_logger import RunPodLogger
@@ -22,6 +25,32 @@ LOGGER = RunPodLogger()
 # Устанавливаем переменные окружения
 os.environ.setdefault("HF_HOME", "/.cache/huggingface")
 os.environ.setdefault("TORCH_HOME", "/.cache/torch")
+
+
+def log_gpu_info():
+    """Логирует информацию о GPU для диагностики"""
+    LOGGER.info("="*60)
+    LOGGER.info("🔍 GPU DIAGNOSTIC INFO:")
+    LOGGER.info(f"PyTorch version: {torch.__version__}")
+    LOGGER.info(f"CUDA available: {torch.cuda.is_available()}")
+
+    if torch.cuda.is_available():
+        LOGGER.info(f"cuDNN version: {torch.backends.cudnn.version()}")
+        LOGGER.info(f"GPU count: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            LOGGER.info(f"GPU {i}: {torch.cuda.get_device_name(i)}")
+            mem = torch.cuda.get_device_properties(i).total_memory / 1024**3
+            LOGGER.info(f"  Memory: {mem:.2f} GB")
+
+    providers = ort.get_available_providers()
+    LOGGER.info(f"ONNX Runtime providers: {providers}")
+
+    if 'CUDAExecutionProvider' in providers:
+        LOGGER.info("✅ ONNX Runtime CUDA support: AVAILABLE")
+    else:
+        LOGGER.info("⚠️ ONNX Runtime CUDA support: NOT AVAILABLE")
+
+    LOGGER.info("="*60)
 
 
 def download_online_model(url: str, dir_name: str) -> None:
@@ -241,4 +270,5 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     LOGGER.info("Starting RunPod Serverless Handler for RVC...")
+    log_gpu_info()
     runpod.serverless.start({"handler": handler})
