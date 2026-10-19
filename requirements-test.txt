@@ -1,0 +1,11 @@
+# Lightweight CPU environment for regression tests; not production dependencies.
+# Install the CPU torch wheel separately on Linux to avoid downloading CUDA:
+# pip install torch==2.0.1 --index-url https://download.pytorch.org/whl/cpu
+pytest>=8,<10
+torch==2.0.1
+numpy==1.24.4
+librosa==0.9.1
+onnxruntime==1.15.1
+soundfile==0.12.1
+tqdm==4.65.0
+setuptools<81

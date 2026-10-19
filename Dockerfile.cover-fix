@@ -1,0 +1,9 @@
+# Build from the exact production v4 digest recorded during validation.
+# Example: --build-arg BASE_IMAGE=sintecs/cover_music@sha256:...
+ARG BASE_IMAGE=sintecs/cover_music:v4
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.description="SongAI cover inference and error propagation fix"
+WORKDIR /workspace
+COPY src/mdx.py /workspace/src/mdx.py
+COPY rp_handler.py /workspace/rp_handler.py

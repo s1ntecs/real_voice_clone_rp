@@ -6,6 +6,8 @@ import urllib.request
 import urllib.parse
 import tempfile
 import base64
+import logging
+import traceback
 from typing import Any, Dict, Optional
 from argparse import Namespace
 
@@ -104,9 +106,15 @@ def download_audio_from_url(url: str) -> str:
     except Exception as e:
         LOGGER.error(f"Failed to download audio: {e}")
         # Fallback на прямую загрузку
-        temp_path = os.path.join(tempfile.gettempdir(), "input_audio.mp3")
-        urllib.request.urlretrieve(url, temp_path)
-        return temp_path
+        suffix = os.path.splitext(urllib.parse.urlsplit(url).path)[1] or ".mp3"
+        fd, temp_path = tempfile.mkstemp(prefix="cover_input_", suffix=suffix)
+        os.close(fd)
+        try:
+            urllib.request.urlretrieve(url, temp_path)
+            return temp_path
+        except Exception:
+            os.remove(temp_path)
+            raise
 
 
 def audio_to_base64(file_path: str) -> str:
@@ -143,13 +151,17 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
       output_format: str - формат вывода ("mp3" или "wav")
     """
 
+    job_id = job.get("id", "unknown")
+    stage = "validation"
+    song_input_path = None
+    cover_path = None
     try:
         inp = job.get("input", {}) or {}
 
         # Получение параметров с дефолтными значениями
         song_input_url = inp.get("song_input_url")
         if not song_input_url:
-            return {"error": "song_input_url is required"}
+            raise ValueError("song_input_url is required")
 
         rvc_model = inp.get("rvc_model", "Squidward")
         custom_rvc_model_download_url = inp.get(
@@ -157,11 +169,11 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
         pitch_change = inp.get("pitch_change", "no-change")
         index_rate = float(inp.get("index_rate", 0.5))
         if not 0 <= index_rate <= 1:
-            return {"error": "index_rate must be between 0 and 1"}
+            raise ValueError("index_rate must be between 0 and 1")
 
         filter_radius = int(inp.get("filter_radius", 3))
         if not 0 <= filter_radius <= 7:
-            return {"error": "filter_radius must be between 0 and 7"}
+            raise ValueError("filter_radius must be between 0 and 7")
 
         rms_mix_rate = float(inp.get("rms_mix_rate", 0.25))
         pitch_detection_algorithm = inp.get("pitch_detection_algorithm",
@@ -182,12 +194,13 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
         output_format = inp.get("output_format", "mp3")
 
         if output_format not in ["mp3", "wav"]:
-            return {"error": "output_format must be 'mp3' or 'wav'"}
+            raise ValueError("output_format must be 'mp3' or 'wav'")
 
         LOGGER.info(f"Processing with model: {rvc_model}")
 
         # Загрузка кастомной модели если указана
         if custom_rvc_model_download_url:
+            stage = "voice_download"
             custom_model_name = urllib.parse.unquote(
                 custom_rvc_model_download_url.split("/")[-1]
             )
@@ -200,7 +213,8 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
             rvc_model = custom_model_name
 
         # Загрузка входного аудио
-        LOGGER.info("Downloading input audio...")
+        stage = "audio_download"
+        LOGGER.info(f"Job {job_id}: downloading input audio")
         song_input_path = download_audio_from_url(song_input_url)
 
         # Конвертация pitch_change в числовое значение
@@ -214,10 +228,11 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
         # Проверка существования модели
         model_path = os.path.join(m.rvc_models_dir, rvc_model)
         if not os.path.exists(model_path):
-            return {"error": f"Model {rvc_model} not found at {model_path}"}
+            raise ValueError(f"Model {rvc_model} not found at {model_path}")
 
         # Запуск pipeline
-        LOGGER.info("Starting voice conversion pipeline...")
+        stage = "inference"
+        LOGGER.info(f"Job {job_id}: starting voice conversion pipeline")
         cover_path = m.song_cover_pipeline(
             song_input_path,
             rvc_model,
@@ -243,6 +258,7 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
         LOGGER.info(f"Cover generated at: {cover_path}")
 
         # Конвертируем результат в base64
+        stage = "encoding"
         audio_base64 = audio_to_base64(cover_path)
 
         # Опционально загружаем на S3 или возвращаем base64
@@ -253,22 +269,30 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
             "model_used": rvc_model
         }
 
-        # Очистка временных файлов
-        if os.path.exists(song_input_path) and song_input_path != cover_path:
-            os.remove(song_input_path)
-
         return result
 
     except Exception as e:
-        LOGGER.error(f"Error in handler: {str(e)}")
-        import traceback
+        error_traceback = traceback.format_exc()
+        LOGGER.error(f"Job {job_id} failed at {stage}: {e}\n{error_traceback}")
         return {
             "error": str(e),
-            "traceback": traceback.format_exc()
+            "error_type": "INVALID_INPUT" if stage == "validation" else "PROVIDER_ERROR",
+            "job_id": job_id,
+            "stage": stage,
+            "traceback": error_traceback,
         }
+    finally:
+        if song_input_path and song_input_path != cover_path:
+            try:
+                os.remove(song_input_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                LOGGER.error(f"Job {job_id}: input cleanup failed: {exc}")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     LOGGER.info("Starting RunPod Serverless Handler for RVC...")
     log_gpu_info()
     runpod.serverless.start({"handler": handler})

@@ -1,8 +1,7 @@
 import gc
 import hashlib
 import os
-import queue
-import threading
+import logging
 import warnings
 
 import librosa
@@ -13,6 +12,7 @@ import torch
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
+logger = logging.getLogger(__name__)
 stem_naming = {'Vocals': 'Instrumental', 'Other': 'Instruments', 'Instrumental': 'Vocals', 'Drums': 'Drumless', 'Bass': 'Bassless'}
 
 
@@ -161,89 +161,89 @@ class MDX:
         # Padded wave
         wave_p = np.concatenate((np.zeros((2, trim)), wave, np.zeros((2, pad)), np.zeros((2, trim))), 1)
 
-        mix_waves = []
-        for i in range(0, n_sample + pad, gen_size):
-            waves = np.array(wave_p[:, i:i + self.model.chunk_size])
-            mix_waves.append(waves)
-
-        mix_waves = torch.tensor(mix_waves, dtype=torch.float32).to(self.device)
+        # Keep the track in host memory; transfer only the current window.
+        mix_waves = (
+            wave_p[:, i:i + self.model.chunk_size]
+            for i in range(0, n_sample + pad, gen_size)
+        )
 
         return mix_waves, pad, trim
 
-    def _process_wave(self, mix_waves, trim, pad, q: queue.Queue, _id: int):
+    def _process_wave(self, mix_waves, trim, pad):
         """
-        Process each wave segment in a multi-threaded environment
+        Process CPU windows sequentially on the calling thread.
 
         Args:
-            mix_waves: (torch.Tensor) Wave segments to be processed
+            mix_waves: Iterator of CPU numpy windows to be processed
             trim: (int) Number of samples trimmed during padding
             pad: (int) Number of samples padded during padding
-            q: (queue.Queue) Queue to hold the processed wave segments
-            _id: (int) Identifier of the processed wave segment
 
         Returns:
             numpy array: Processed wave segment
         """
-        mix_waves = mix_waves.split(1)
         with torch.no_grad():
             pw = []
             for mix_wave in mix_waves:
+                mix_wave = torch.as_tensor(
+                    np.asarray(mix_wave, dtype=np.float32)
+                ).unsqueeze(0).to(self.device)
                 self.prog.update()
                 spec = self.model.stft(mix_wave)
-                processed_spec = torch.tensor(self.process(spec))
-                processed_wav = self.model.istft(processed_spec.to(self.device))
+                processed_spec = torch.as_tensor(self.process(spec)).to(self.device)
+                processed_wav = self.model.istft(processed_spec)
                 processed_wav = processed_wav[:, :, trim:-trim].transpose(0, 1).reshape(2, -1).cpu().numpy()
                 pw.append(processed_wav)
-        processed_signal = np.concatenate(pw, axis=-1)[:, :-pad]
-        q.put({_id: processed_signal})
+                del mix_wave, spec, processed_spec
+        processed_signal = np.concatenate(pw, axis=-1)
+        if pad:
+            processed_signal = processed_signal[:, :-pad]
         return processed_signal
 
     def process_wave(self, wave: np.array, mt_threads=1):
         """
-        Process the wave array in a multi-threaded environment
+        Process a stereo track with one inference window on the GPU at a time.
 
         Args:
             wave: (np.array) Wave array to be processed
-            mt_threads: (int) Number of threads to be used for processing
+            mt_threads: Legacy compatibility argument; inference is sequential
 
         Returns:
             numpy array: Processed wave array
         """
-        self.prog = tqdm(total=0)
-        chunk = wave.shape[-1] // mt_threads
-        waves = self.segment(wave, False, chunk)
-
-        # Create a queue to hold the processed wave segments
-        q = queue.Queue()
-        threads = []
-        for c, batch in enumerate(waves):
-            mix_waves, pad, trim = self.pad_wave(batch)
-            self.prog.total = len(mix_waves) * mt_threads
-            thread = threading.Thread(target=self._process_wave, args=(mix_waves, trim, pad, q, c))
-            thread.start()
-            threads.append(thread)
-        for thread in threads:
-            thread.join()
-        self.prog.close()
-
-        processed_batches = []
-        while not q.empty():
-            processed_batches.append(q.get())
-        processed_batches = [list(wave.values())[0] for wave in
-                             sorted(processed_batches, key=lambda d: list(d.keys())[0])]
-        assert len(processed_batches) == len(waves), 'Incomplete processed batches, please reduce batch size!'
-        return self.segment(processed_batches, True, chunk)
+        if wave.ndim != 2 or wave.shape[0] != 2 or wave.shape[1] == 0:
+            raise ValueError("Audio must contain nonempty stereo samples")
+        mix_waves, pad, trim = self.pad_wave(wave)
+        gen_size = self.model.chunk_size - 2 * trim
+        self.prog = tqdm(total=(wave.shape[1] + pad) // gen_size)
+        try:
+            # Keep mt_threads accepted for older callers, but execute inference
+            # on this thread so the real exception and traceback reach RunPod.
+            return self._process_wave(mix_waves, trim, pad)
+        finally:
+            self.prog.close()
 
 
 def run_mdx(model_params, output_dir, model_path, filename, exclude_main=False, exclude_inversion=False, suffix=None, invert_suffix=None, denoise=False, keep_orig=True, m_threads=2):
-    device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
+    wave, sr = librosa.load(filename, mono=False, sr=44100)
+    if wave.size == 0 or not np.isfinite(wave).all():
+        raise ValueError("Audio is empty or contains invalid samples")
+    if wave.ndim == 1:
+        wave = np.stack((wave, wave))
+    if wave.ndim != 2 or wave.shape[0] != 2:
+        raise ValueError("Audio must have one or two channels")
+    peak = float(np.max(np.abs(wave)))
+    if peak == 0:
+        raise ValueError("Audio contains only silence")
 
-    device_properties = torch.cuda.get_device_properties(device)
-    vram_gb = device_properties.total_memory / 1024**3
-    m_threads = 1 if vram_gb < 8 else 2
+    device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
+    logger.info("MDX model=%s input=%s duration=%.2fs device=%s",
+                os.path.basename(model_path), os.path.basename(filename),
+                wave.shape[-1] / sr, device)
 
     model_hash = MDX.get_hash(model_path)
     mp = model_params.get(model_hash)
+    if not mp:
+        raise ValueError(f"Unknown MDX model parameters: {os.path.basename(model_path)}")
     model = MDXModel(
         device,
         dim_f=mp["mdx_dim_f_set"],
@@ -253,16 +253,27 @@ def run_mdx(model_params, output_dir, model_path, filename, exclude_main=False, 
         compensation=mp["compensate"]
     )
 
-    mdx_sess = MDX(model_path, model)
-    wave, sr = librosa.load(filename, mono=False, sr=44100)
+    mdx_sess = MDX(model_path, model, processor=0 if device.type == "cuda" else -1)
     # normalizing input wave gives better output
-    peak = max(np.max(wave), abs(np.min(wave)))
     wave /= peak
-    if denoise:
-        wave_processed = -(mdx_sess.process_wave(-wave, m_threads)) + (mdx_sess.process_wave(wave, m_threads))
-        wave_processed *= 0.5
-    else:
-        wave_processed = mdx_sess.process_wave(wave, m_threads)
+    try:
+        if denoise:
+            wave_processed = -(mdx_sess.process_wave(-wave)) + (mdx_sess.process_wave(wave))
+            wave_processed *= 0.5
+        else:
+            wave_processed = mdx_sess.process_wave(wave)
+    except Exception:
+        logger.exception("MDX inference failed: model=%s device=%s",
+                         os.path.basename(model_path), device)
+        raise
+    finally:
+        del mdx_sess
+        gc.collect()
+        if device.type == "cuda":
+            logger.info("MDX GPU allocated=%d reserved=%d peak=%d",
+                        torch.cuda.memory_allocated(), torch.cuda.memory_reserved(),
+                        torch.cuda.max_memory_allocated())
+            torch.cuda.empty_cache()
     # return to previous peak
     wave_processed *= peak
     stem_name = model.stem_name if suffix is None else suffix
@@ -282,6 +293,6 @@ def run_mdx(model_params, output_dir, model_path, filename, exclude_main=False, 
     if not keep_orig:
         os.remove(filename)
 
-    del mdx_sess, wave_processed, wave
+    del wave_processed, wave
     gc.collect()
     return main_filepath, invert_filepath
