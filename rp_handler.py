@@ -216,6 +216,8 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
         stage = "audio_download"
         LOGGER.info(f"Job {job_id}: downloading input audio")
         song_input_path = download_audio_from_url(song_input_url)
+        if os.path.getsize(song_input_path) == 0:
+            raise ValueError("Downloaded audio file is empty")
 
         # Конвертация pitch_change в числовое значение
         if pitch_change == "no-change":
@@ -273,9 +275,20 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
 
     except Exception as e:
         error_traceback = traceback.format_exc()
-        LOGGER.error(f"Job {job_id} failed at {stage}: {e}\n{error_traceback}")
+        # Some decoders raise EOFError() and the pipeline wraps it as
+        # Exception(""). RunPod drops an empty error, so retain its cause.
+        cause = e
+        seen = set()
+        while not str(cause).strip() and id(cause) not in seen:
+            seen.add(id(cause))
+            parent = cause.__cause__ or cause.__context__
+            if parent is None:
+                break
+            cause = parent
+        error_message = str(cause).strip() or type(cause).__name__
+        LOGGER.error(f"Job {job_id} failed at {stage}: {error_message}\n{error_traceback}")
         return {
-            "error": str(e),
+            "error": error_message,
             "error_type": "INVALID_INPUT" if stage == "validation" else "PROVIDER_ERROR",
             "job_id": job_id,
             "stage": stage,

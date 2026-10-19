@@ -77,3 +77,33 @@ def test_invalid_request_has_an_explicit_stage_and_error_type(handler):
     assert result["error_type"] == "INVALID_INPUT"
     assert result["stage"] == "validation"
     assert result["job_id"] == "bad-job"
+
+
+@pytest.mark.parametrize("wrap", [False, True])
+def test_exception_without_message_still_returns_a_nonempty_original_cause(handler, wrap):
+    module, pipeline, _ = handler
+
+    def fail(*args, **kwargs):
+        try:
+            raise EOFError()
+        except EOFError as error:
+            if wrap:
+                raise Exception(str(error))
+            raise
+
+    pipeline.song_cover_pipeline = fail
+    result = module.handler({"id": "empty-error", "input": {"song_input_url": "https://files/track.mp3", "rvc_model": "Singer"}})
+    assert result["error"] == "EOFError"
+    assert "EOFError" in result["traceback"]
+
+
+def test_empty_download_is_rejected_before_voice_conversion(handler):
+    module, pipeline, folder = handler
+    (folder / "input.mp3").write_bytes(b"")
+    calls = []
+    pipeline.song_cover_pipeline = lambda *a, **kw: calls.append(a)
+    result = module.handler({"id": "empty-file", "input": {"song_input_url": "https://files/track.mp3", "rvc_model": "Singer"}})
+    assert result["error"] == "Downloaded audio file is empty"
+    assert result["stage"] == "audio_download"
+    assert calls == []
+    assert not (folder / "input.mp3").exists()
