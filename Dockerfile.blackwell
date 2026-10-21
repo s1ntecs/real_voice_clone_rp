@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+# Extend the tested immutable image to retain baked RVC/HuBERT/MDX assets.
+ARG BASE_IMAGE=sintecs/cover_music@sha256:6fc3775383fd2d1d519fe8a9d84bafcf4cd9614b5717b22681142646127442af
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.description="SongAI cover worker with CUDA 12.8 Blackwell support"
+WORKDIR /workspace
+
+# PyTorch wheels include matching CUDA 12.8 and cuDNN 9 runtime libraries.
+# Temporary wheel extraction goes to RAM rather than doubling disk usage.
+RUN --mount=type=tmpfs,target=/tmp \
+    python3 -m pip install --no-cache-dir --timeout=120 --retries=5 \
+        torch==2.7.1+cu128 torchvision==0.22.1+cu128 torchaudio==2.7.1+cu128 \
+        --index-url https://download.pytorch.org/whl/cu128 && \
+    python3 -m pip install --no-cache-dir \
+        numpy==1.26.4 onnxruntime-gpu==1.22.0
+
+# The inherited CUDA 11.8 development toolkit is unused: inference uses the
+# CUDA 12.8 libraries bundled with the pinned PyTorch wheels.
+ENV NVIDIA_REQUIRE_CUDA="cuda>=12.8"
+COPY src/mdx.py /workspace/src/mdx.py
+COPY src/rvc.py /workspace/src/rvc.py
+COPY src/vc_infer_pipeline.py /workspace/src/vc_infer_pipeline.py
+COPY rp_handler.py /workspace/rp_handler.py
+COPY scripts/verify_gpu_runtime.py /workspace/scripts/verify_gpu_runtime.py
+COPY start_blackwell.sh /workspace/start_blackwell.sh
+CMD ["/bin/bash", "/workspace/start_blackwell.sh"]

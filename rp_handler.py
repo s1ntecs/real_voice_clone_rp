@@ -59,8 +59,15 @@ def download_online_model(url: str, dir_name: str) -> None:
     """Скачивает и распаковывает модель RVC."""
     LOGGER.info(f"Downloading voice model: {dir_name}")
 
+    if (not isinstance(dir_name, str) or not dir_name
+            or dir_name in {".", ".."}
+            or any(char in dir_name for char in ("/", "\\", "\0"))):
+        raise ValueError("Invalid voice model directory: expected a single name")
+    models_root = os.path.realpath(m.rvc_models_dir)
+    extraction_folder = os.path.realpath(os.path.join(models_root, dir_name))
+    if os.path.dirname(extraction_folder) != models_root:
+        raise ValueError("Invalid voice model directory: must stay inside rvc_models")
     zip_name = url.split("/")[-1]
-    extraction_folder = os.path.join(m.rvc_models_dir, dir_name)
 
     if os.path.exists(extraction_folder):
         LOGGER.info(f"Model {dir_name} already exists, skipping download")

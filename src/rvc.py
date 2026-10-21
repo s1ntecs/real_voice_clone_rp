@@ -3,6 +3,7 @@ from pathlib import Path
 
 import torch
 from fairseq import checkpoint_utils
+from omegaconf import OmegaConf
 from scipy.io import wavfile
 
 from infer_pack.models import (
@@ -96,7 +97,19 @@ class Config:
 
 
 def load_hubert(device, is_half, model_path):
-    models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([model_path], suffix='', )
+    trusted_path = BASE_DIR / 'rvc_models' / 'hubert_base.pt'
+    if Path(model_path).resolve() != trusted_path.resolve():
+        raise ValueError('Only the baked HuBERT checkpoint may use trusted pickle loading')
+    # fairseq 0.12.2 predates PyTorch's weights_only=True default. This
+    # checkpoint is baked into the immutable image, never a downloaded voice.
+    state = torch.load(model_path, map_location='cpu', weights_only=False)
+    if state.get('cfg') is not None:
+        state['cfg'] = OmegaConf.create(state['cfg'])
+        OmegaConf.set_struct(state['cfg'], True)
+    state = checkpoint_utils._upgrade_state_dict(state)
+    models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task(
+        [model_path], suffix='', state=state
+    )
     hubert = models[0]
     hubert = hubert.to(device)
 
@@ -110,7 +123,7 @@ def load_hubert(device, is_half, model_path):
 
 
 def get_vc(device, is_half, config, model_path):
-    cpt = torch.load(model_path, map_location='cpu')
+    cpt = torch.load(model_path, map_location='cpu', weights_only=True)
     if "config" not in cpt or "weight" not in cpt:
         raise ValueError(f'Incorrect format for {model_path}. Use a voice model trained using RVC v2 instead.')
 

@@ -107,3 +107,65 @@ def test_empty_download_is_rejected_before_voice_conversion(handler):
     assert result["stage"] == "audio_download"
     assert calls == []
     assert not (folder / "input.mp3").exists()
+
+
+def test_encoded_voice_directory_cannot_overwrite_baked_checkpoint(handler, monkeypatch):
+    import zipfile
+    module, _, folder = handler
+    trusted = folder / "hubert_base.pt"
+    trusted.write_bytes(b"baked checkpoint")
+    monkeypatch.chdir(folder)
+
+    def retrieve(url, destination):
+        with zipfile.ZipFile(destination, "w") as archive:
+            archive.writestr("hubert_base.pt", b"untrusted downloaded content")
+        return destination, None
+
+    monkeypatch.setattr(module.urllib.request, "urlretrieve", retrieve)
+    result = module.handler({"id": "unsafe-directory", "input": {
+        "song_input_url": "https://files/track.mp3", "rvc_model": "Singer",
+        "custom_rvc_model_download_url": "https://files/fresh%2F.."}})
+    assert "model directory" in result.get("error", "")
+    assert result["stage"] == "voice_download"
+    assert trusted.read_bytes() == b"baked checkpoint"
+
+
+@pytest.mark.parametrize("directory", ["", ".", "..", "fresh/..", "fresh\\..", "/outside"])
+def test_custom_voice_directory_must_be_a_single_component(handler, monkeypatch, directory):
+    module, _, _ = handler
+    def unexpected_download(*args):
+        pytest.fail("Invalid directory must be rejected before any download")
+    monkeypatch.setattr(module.urllib.request, "urlretrieve", unexpected_download)
+    with pytest.raises(ValueError, match="model directory"):
+        module.download_online_model("https://files/voice.zip", directory)
+
+
+def test_regular_custom_archive_stays_inside_its_voice_directory(handler, monkeypatch):
+    import zipfile
+    module, _, folder = handler
+    trusted = folder / "hubert_base.pt"
+    trusted.write_bytes(b"baked checkpoint")
+    monkeypatch.chdir(folder)
+
+    def retrieve(url, destination):
+        with zipfile.ZipFile(destination, "w") as archive:
+            archive.writestr("nested/voice.pth", b"voice weights")
+            archive.writestr("nested/hubert_base.pt", b"custom checkpoint")
+        return destination, None
+
+    monkeypatch.setattr(module.urllib.request, "urlretrieve", retrieve)
+    module.download_online_model("https://files/voice.zip", "Custom Voice")
+    assert (folder / "Custom Voice" / "voice.pth").read_bytes() == b"voice weights"
+    assert (folder / "Custom Voice" / "hubert_base.pt").read_bytes() == b"custom checkpoint"
+    assert trusted.read_bytes() == b"baked checkpoint"
+
+
+def test_existing_voice_symlink_cannot_bypass_directory_containment(handler):
+    module, _, folder = handler
+    link = folder / "Alias"
+    try:
+        link.symlink_to(folder.parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    with pytest.raises(ValueError, match="model directory"):
+        module.download_online_model("https://files/voice.zip", "Alias")
