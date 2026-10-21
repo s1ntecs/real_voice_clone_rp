@@ -75,12 +75,31 @@ First-job queue delay with Flashboot OFF was 263.419 seconds on RTX 4090 and
 The first RTX A4000 job queued for 312.331 seconds.
 The uncompressed image is 34,841,033,603 bytes (32.45 GiB). One discarded RTX 4090
 provisioning attempt hit Docker Hub's anonymous pull quota; a subsequent worker
-successfully started. No registry credentials or production settings changed.
+successfully started. No registry credentials changed during acceptance.
 
-The live endpoint remains on `fix-20261019-88fbaa7` with Blackwell MIG excluded.
-This image has not been deployed to that endpoint.
 All three acceptance endpoints were scaled to minimum/maximum zero after their
 jobs finished, and the temporary audio server was stopped (port verified closed).
+
+Production rollout completed on 22 October 2026 (Asia/Yekaterinburg;
+21 October UTC). Existing endpoint `ys5oqibu9wy1y4` is version **14**, using
+template `9na0iw11jc` and the immutable image digest above. Read-back through
+GraphQL and REST v2 confirmed minimum CUDA **12.8**, no exact-version whitelist,
+and pools `AMPERE_16,ADA_24,AMPERE_24` with the Blackwell MIG exclusion removed.
+Environment values, disk 25 GB, workers 0–5, idle timeout 5 seconds, queue-delay
+scaling 4, Flashboot and execution timeout 700000 ms were preserved.
+
+Production smoke job `84b2294d-3aad-4d68-a16c-7eea6a969ed2-e2` completed on
+new-image RTX 4090 worker `9nbva65aswkhbb`: 7.128 seconds execution, 21.236 seconds
+queue delay. Startup reported torch 2.7.1+cu128, CUDA 12.8 and **178 ONNX CUDA
+compute nodes**. Its stereo MP3 fully decodes to 6.72 seconds from a 6.765714-second
+input, with finite non-silent samples (RMS 0.04863). An earlier smoke job completed
+on an outdated worker during rolling replacement and was not counted as new-image
+validation. These direct provider checks bypassed Redis and notifications.
+The temporary fixture server was stopped again after validation.
+
+The original template `thwz2gfxhh` remains available, plus rollback copy
+`r6214sfrk0` using `fix-20261019-88fbaa7`. Restore the old image, Blackwell MIG
+exclusion and previous empty CUDA floor together if rolling back.
 
 For acceptance, use separate endpoints with max one worker and force exact GPU
 types through pool exclusions. Run a full cover with built-in and custom voices,
@@ -89,12 +108,16 @@ successful request on the same worker. Fully decode outputs and check finite,
 non-silent samples and preserved duration. Record actual worker GPU types and
 image digest, then stop test workers.
 
-Once accepted, deployment requires replacing the RunPod image, setting
+For subsequent deployments, replace the RunPod image, set
 `gpu.minCudaVersion` to `"12.8"`, and removing the Blackwell type exclusion.
 A newer host CUDA/driver version such as 13.x is also suitable; do not restrict
 the allowed versions to exactly 12.8. Rebuilding backend Compose services alone
 does not replace this external GPU worker image. Rollback restores the old image
 and the Blackwell MIG exclusion; keep the previous tag and digest available.
+Always read back the actual image: the GraphQL `saveEndpoint` update accepted
+`templateId` but retained the old template in this rollout. REST v1 PATCH applied
+the template replacement while REST v2 was temporarily unavailable. Prefer the
+current REST v2 endpoint image update for future releases and verify its result.
 
 References: [PyTorch 2.7 Blackwell/CUDA 12.8](https://pytorch.org/blog/pytorch-2-7/),
 [official wheel version combinations](https://pytorch.org/get-started/previous-versions/),
