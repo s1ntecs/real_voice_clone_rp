@@ -11,8 +11,8 @@ Build from a clean committed checkout, keeping the immutable base digest in
 `Dockerfile.blackwell`:
 
 ```sh
-docker build -f Dockerfile.blackwell -t sintecs/cover_music:blackwell-20261021-candidate2 .
-docker push sintecs/cover_music:blackwell-20261021-candidate2
+docker build -f Dockerfile.blackwell -t sintecs/cover_music:blackwell-20261021-c920723 .
+docker push sintecs/cover_music:blackwell-20261021-c920723
 ```
 
 Pinned inference stack: Python 3.10 from the tested base; torch 2.7.1+cu128,
@@ -37,8 +37,50 @@ The HTTP/RunPod input and output contract is unchanged.
 
 ## Verification and rollout
 
-Hardware acceptance is pending. Do not deploy this candidate on that basis.
+Published image: **`sintecs/cover_music:blackwell-20261021-c920723`**.
+Immutable digest:
+
+```text
+sintecs/cover_music@sha256:3d138b9a9e069285eb41229f8376b2e2c180a226831e1f969bc053845e917767
+```
+
+Source implementation commit: `c920723`. Complete Linux worker suite: **32 passed**;
+`pip check`: no broken requirements. CPU startup correctly rejects absent CUDA.
+
+Measured hardware acceptance on 21 October 2026:
+
+| GPU | Successful audio results | Expected empty-input failures | Worker |
+|---|---:|---:|---|
+| RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb | 8 | 1 | `db7tqny7a8svmd` |
+| RTX 4090 | 7 | 1 | `ov1o9dbijt3trt` |
+| RTX A4000 (16 GB) | 3 | 0 | `m4g9wiajtvt2j4` |
+
+The tested workers completed full RVC covers using SonGoku and custom WillyWill4Real
+voices. Inputs included MP3, WAV, M4A, mono and stereo; output contracts MP3 and
+WAV both passed. A 358.217143-second MP3 returned decoded audio of 358.14 seconds
+on Blackwell and 358.12 seconds on RTX 4090 (container/encoder padding included
+in input duration). Default full long-cover execution was 52.590 and 43.952 seconds,
+respectively. The additional Blackwell custom-voice long cover reused the
+pipeline's cached separation and took 14.704 seconds; it is not a fresh separation
+benchmark. Built-in/custom output signals differ.
+
+All 18 results fully decode, contain finite nonzero samples, and preserve input
+duration within 0.12 seconds. After each empty-input failure, the same worker
+processed an input with a previously unseen file hash, exercising fresh inference.
+RTX A4000 (16 GB) also passed built-in/custom short covers and the full long
+cover in 58.277 seconds, with 358.14 seconds of decoded output.
+
+First-job queue delay with Flashboot OFF was 263.419 seconds on RTX 4090 and
+362.522 seconds on Blackwell, including placement, image transfer and startup.
+The first RTX A4000 job queued for 312.331 seconds.
+The uncompressed image is 34,841,033,603 bytes (32.45 GiB). One discarded RTX 4090
+provisioning attempt hit Docker Hub's anonymous pull quota; a subsequent worker
+successfully started. No registry credentials or production settings changed.
+
 The live endpoint remains on `fix-20261019-88fbaa7` with Blackwell MIG excluded.
+This image has not been deployed to that endpoint.
+All three acceptance endpoints were scaled to minimum/maximum zero after their
+jobs finished, and the temporary audio server was stopped (port verified closed).
 
 For acceptance, use separate endpoints with max one worker and force exact GPU
 types through pool exclusions. Run a full cover with built-in and custom voices,
@@ -47,8 +89,10 @@ successful request on the same worker. Fully decode outputs and check finite,
 non-silent samples and preserved duration. Record actual worker GPU types and
 image digest, then stop test workers.
 
-Once accepted, deployment requires replacing the RunPod image and removing the
-Blackwell type exclusion together. Rebuilding backend Compose services alone
+Once accepted, deployment requires replacing the RunPod image, setting
+`gpu.minCudaVersion` to `"12.8"`, and removing the Blackwell type exclusion.
+A newer host CUDA/driver version such as 13.x is also suitable; do not restrict
+the allowed versions to exactly 12.8. Rebuilding backend Compose services alone
 does not replace this external GPU worker image. Rollback restores the old image
 and the Blackwell MIG exclusion; keep the previous tag and digest available.
 

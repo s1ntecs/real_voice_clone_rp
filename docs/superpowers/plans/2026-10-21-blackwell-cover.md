@@ -26,11 +26,11 @@
 - [x] Implement the smallest scoped checkpoint change; run the complete worker test suite and real model CPU load.
 
 ## Task 2: Hardware acceptance and release
-- [ ] Publish a uniquely tagged candidate, create isolated Blackwell endpoint (one worker).
-- [ ] Full pipeline: built-in/custom voice, short/long audio, invalid input then fresh successful request. Decode and validate output duration, finite samples and non-silence.
-- [ ] Repeat representative cases on an existing Ampere/Ada card.
-- [ ] Review the branch, record image digest/hardware/results/rollback, push reviewed commits through Git.
-- [ ] Stop temporary GPU resources and audio server; report remaining deployment step precisely.
+- [x] Publish a uniquely tagged candidate, create isolated Blackwell endpoint (one worker).
+- [x] Full pipeline: built-in/custom voice, short/long audio, invalid input then fresh successful request. Decode and validate output duration, finite samples and non-silence.
+- [x] Repeat representative cases on an existing Ampere/Ada card.
+- [x] Review the branch, record image digest/hardware/results/rollback, push reviewed commits through Git.
+- [x] Stop temporary GPU resources and audio server; report remaining deployment step precisely.
 
 ## Decisions and evidence
 - Root cause already reproduced in production: torch 2.0.1+cu118 fails at reflect padding/STFT on the Blackwell MIG worker; both reported tasks used the same worker.
@@ -45,4 +45,8 @@
 - Complete corrected Linux worker suite: 32 passed; pip check: No broken requirements found.
 - Real default startup on a CPU-only builder reaches the preflight and rejects absent CUDA as designed; Linux shell line endings pinned in .gitattributes.
 - Independent review of both fixes: no remaining blocking issues.
-- Image hardware acceptance remains pending; production image/exclusion unchanged.
+- Final immutable digest: sha256:3d138b9a9e069285eb41229f8376b2e2c180a226831e1f969bc053845e917767, published as sintecs/cover_music:blackwell-20261021-c920723.
+- GPU acceptance: 18 complete finite/non-silent audio outputs across exact Blackwell MIG (8), RTX 4090 (7) and RTX A4000 16 GB (3). Two empty files failed explicitly and both workers recovered with fresh inference on a previously unseen input hash.
+- Inputs cover mono/stereo MP3/WAV/M4A, standard/custom voice models and 358.217143-second audio. Full long inference: Blackwell52.590s, Ada43.952s, A400058.277s; output durations within0.12s. Custom long repeat reused cached separation and is not a fresh-separation benchmark.
+- All three test endpoints scaled min/max0; temporary audio server stopped and port closure verified; unrelated test-server containers remain32.
+- Code branch c920723 pushed. Release documentation and main integration follow verification. Production remains on the previous image with Blackwell excluded; no live image cutover performed.
